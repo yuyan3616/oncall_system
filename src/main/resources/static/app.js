@@ -1,4 +1,4 @@
-// SuperBizAgent 前端应用
+﻿// SuperBizAgent 前端应用
 class SuperBizAgentApp {
     constructor() {
         this.apiBaseUrl = 'http://localhost:9900/api';
@@ -8,6 +8,9 @@ class SuperBizAgentApp {
         this.currentChatHistory = []; // 当前对话的消息历史
         this.chatHistories = this.loadChatHistories(); // 所有历史对话
         this.isCurrentChatFromHistory = false; // 标记当前对话是否是从历史记录加载的
+        this.activeIngestionTasks = new Map();
+        this.ingestPollingIntervalMs = 2000;
+        this.ingestPollingMaxAttempts = 120;
         
         this.initializeElements();
         this.bindEvents();
@@ -1069,9 +1072,20 @@ class SuperBizAgentApp {
             const data = await response.json();
 
             if ((data.code === 200 || data.message === 'success') && data.data) {
-                // 在聊天界面显示上传成功消息
-                const successMessage = `${file.name} 上传到知识库成功`;
-                this.addMessage('assistant', successMessage, false, true);
+                const uploadData = data.data || {};
+                const taskId = uploadData.taskId;
+                const ingestionStatus = uploadData.ingestionStatus || 'PROCESSING';
+
+                if (taskId) {
+                    const acceptedMessage = `${file.name} 上传成功，已进入入库队列（taskId: ${taskId}），当前状态：${ingestionStatus}`;
+                    this.addMessage('assistant', acceptedMessage, false, true);
+                    this.showNotification('文件已上传，后台正在入库处理中', 'info');
+                    this.startIngestionTaskPolling(taskId, file.name);
+                } else {
+                    // 兼容旧后端返回
+                    const successMessage = `${file.name} 上传到知识库成功`;
+                    this.addMessage('assistant', successMessage, false, true);
+                }
             } else {
                 throw new Error(data.message || '上传失败');
             }
@@ -1088,6 +1102,99 @@ class SuperBizAgentApp {
             this.showUploadOverlay(false);
             this.updateUI();
         }
+    }
+
+    // 上传后轮询入库任务状态
+    startIngestionTaskPolling(taskId, fileName) {
+        if (!taskId || this.activeIngestionTasks.has(taskId)) {
+            return;
+        }
+        this.activeIngestionTasks.set(taskId, {
+            fileName,
+            lastState: '',
+            attempts: 0
+        });
+        this.pollIngestionTask(taskId);
+    }
+
+    async pollIngestionTask(taskId) {
+        const taskMeta = this.activeIngestionTasks.get(taskId);
+        if (!taskMeta) {
+            return;
+        }
+
+        while (taskMeta.attempts < this.ingestPollingMaxAttempts) {
+            taskMeta.attempts += 1;
+            try {
+                const response = await fetch(`${this.apiBaseUrl}/upload/tasks/${encodeURIComponent(taskId)}`);
+                if (!response.ok) {
+                    if (response.status === 404) {
+                        throw new Error('任务不存在或已过期');
+                    }
+                    throw new Error(`HTTP错误: ${response.status}`);
+                }
+
+                const result = await response.json();
+                const taskData = result && result.data ? result.data : {};
+                const status = taskData.status || {};
+                const state = status.state || '';
+                if (state && state !== taskMeta.lastState) {
+                    taskMeta.lastState = state;
+                }
+
+                if (state === 'SUCCESS') {
+                    this.addMessage('assistant', `${taskMeta.fileName} 入库完成，现在可以检索了。`, false, true);
+                    this.showNotification(`${taskMeta.fileName} 入库完成`, 'success');
+                    this.activeIngestionTasks.delete(taskId);
+                    return;
+                }
+
+                if (state === 'PARTIAL_SUCCESS') {
+                    const failedChunks = typeof status.failedChunks === 'number' ? status.failedChunks : '?';
+                    this.addMessage(
+                        'assistant',
+                        `${taskMeta.fileName} 入库部分成功（失败分片: ${failedChunks}）。可稍后重传，或查询任务详情：/api/upload/tasks/${taskId}`,
+                        false,
+                        true
+                    );
+                    this.showNotification(`${taskMeta.fileName} 入库部分成功`, 'warning');
+                    this.activeIngestionTasks.delete(taskId);
+                    return;
+                }
+
+                if (state === 'FAILED') {
+                    const errorMessage = status.errorMessage || '未知错误';
+                    this.addMessage(
+                        'assistant',
+                        `${taskMeta.fileName} 入库失败：${errorMessage}。可查询任务详情：/api/upload/tasks/${taskId}`,
+                        false,
+                        true
+                    );
+                    this.showNotification(`${taskMeta.fileName} 入库失败`, 'error');
+                    this.activeIngestionTasks.delete(taskId);
+                    return;
+                }
+            } catch (error) {
+                console.error('入库任务轮询失败:', error);
+            }
+
+            await this.delay(this.ingestPollingIntervalMs);
+        }
+
+        if (this.activeIngestionTasks.has(taskId)) {
+            this.activeIngestionTasks.delete(taskId);
+            this.addMessage(
+                'assistant',
+                `${taskMeta.fileName} 已上传，但入库状态查询超时。请稍后查询：/api/upload/tasks/${taskId}`,
+                false,
+                true
+            );
+            this.showNotification('入库状态查询超时，请稍后重试', 'warning');
+        }
+    }
+
+    delay(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
 
     // 格式化文件大小

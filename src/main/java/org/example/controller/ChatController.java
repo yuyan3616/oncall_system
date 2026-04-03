@@ -10,10 +10,12 @@ import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
 import lombok.Getter;
 import lombok.Setter;
+import org.example.memory.ConversationMemoryService;
+import org.example.memory.ConversationMemoryState;
 import org.example.service.AiOpsService;
 import org.example.service.ChatService;
-import org.example.stability.model.NonRetryableModelException;
 import org.example.stability.model.ModelRoutingService;
+import org.example.stability.model.NonRetryableModelException;
 import org.example.stability.queue.RateLimitRejectedException;
 import org.example.stability.queue.RequestQueueLimiter;
 import org.example.stability.trace.TraceContext;
@@ -25,14 +27,16 @@ import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import reactor.core.publisher.Flux;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -40,7 +44,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.ReentrantLock;
 
 @RestController
 @RequestMapping("/api")
@@ -48,7 +51,6 @@ public class ChatController {
 
     private static final Logger logger = LoggerFactory.getLogger(ChatController.class);
     private static final String BUSY_MESSAGE = "系统繁忙，请稍后再试";
-    private static final int MAX_WINDOW_SIZE = 6;
 
     private final ExecutorService executor = Executors.newCachedThreadPool();
     private final Map<String, SessionInfo> sessions = new ConcurrentHashMap<>();
@@ -58,22 +60,25 @@ public class ChatController {
     private final ToolCallbackProvider tools;
     private final RequestQueueLimiter requestQueueLimiter;
     private final ModelRoutingService modelRoutingService;
+    private final ConversationMemoryService conversationMemoryService;
 
     public ChatController(AiOpsService aiOpsService,
                           ChatService chatService,
                           ToolCallbackProvider tools,
                           RequestQueueLimiter requestQueueLimiter,
-                          ModelRoutingService modelRoutingService) {
+                          ModelRoutingService modelRoutingService,
+                          ConversationMemoryService conversationMemoryService) {
         this.aiOpsService = aiOpsService;
         this.chatService = chatService;
         this.tools = tools;
         this.requestQueueLimiter = requestQueueLimiter;
         this.modelRoutingService = modelRoutingService;
+        this.conversationMemoryService = conversationMemoryService;
     }
 
     @PostMapping("/chat")
     public ResponseEntity<ApiResponse<ChatResponse>> chat(@RequestBody ChatRequest request) {
-        String sessionId = request.getId();
+        String sessionId = resolveSessionId(request.getId());
         TraceContext context = TraceContextHolder.start("chat", "/api/chat", sessionId);
         TraceLogger.info(logger, "request_received",
                 "questionLength", request.getQuestion() == null ? 0 : request.getQuestion().length());
@@ -88,10 +93,10 @@ public class ChatController {
             }
 
             SessionInfo session = getOrCreateSession(sessionId);
-            List<Map<String, String>> history = session.getHistory();
-            String systemPrompt = chatService.buildSystemPrompt(history);
+            ConversationMemoryState memoryState = conversationMemoryService.snapshot(session.getSessionId());
+            String systemPrompt = chatService.buildSystemPrompt(memoryState);
             String answer = chatService.executeChatWithFallback("/api/chat", systemPrompt, request.getQuestion());
-            session.addMessage(request.getQuestion(), answer);
+            conversationMemoryService.appendMessagePair(session.getSessionId(), request.getQuestion(), answer);
 
             status = "success";
             return ResponseEntity.ok(ApiResponse.success(ChatResponse.success(answer)));
@@ -121,19 +126,19 @@ public class ChatController {
             return ResponseEntity.ok(ApiResponse.error("会话ID不能为空"));
         }
 
-        SessionInfo session = sessions.get(request.getId());
+        SessionInfo session = sessions.remove(request.getId());
         if (session == null) {
             return ResponseEntity.ok(ApiResponse.error("会话不存在"));
         }
 
-        session.clearHistory();
+        conversationMemoryService.clear(request.getId());
         return ResponseEntity.ok(ApiResponse.success("会话历史已清空"));
     }
 
     @PostMapping(value = "/chat_stream", produces = "text/event-stream;charset=UTF-8")
     public SseEmitter chatStream(@RequestBody ChatRequest request) {
         SseEmitter emitter = new SseEmitter(300000L);
-        String sessionId = request.getId();
+        String sessionId = resolveSessionId(request.getId());
         TraceContext context = TraceContextHolder.start("chat_stream", "/api/chat_stream", sessionId);
         TraceLogger.info(logger, "request_received",
                 "questionLength", request.getQuestion() == null ? 0 : request.getQuestion().length());
@@ -174,11 +179,11 @@ public class ChatController {
             String status = "failed";
             try {
                 SessionInfo session = getOrCreateSession(sessionId);
-                List<Map<String, String>> history = session.getHistory();
-                String systemPrompt = chatService.buildSystemPrompt(history);
+                ConversationMemoryState memoryState = conversationMemoryService.snapshot(session.getSessionId());
+                String systemPrompt = chatService.buildSystemPrompt(memoryState);
 
                 String fullAnswer = executeStreamWithFallback(request.getQuestion(), systemPrompt, emitter);
-                session.addMessage(request.getQuestion(), fullAnswer);
+                conversationMemoryService.appendMessagePair(session.getSessionId(), request.getQuestion(), fullAnswer);
 
                 emitter.send(SseEmitter.event()
                         .name("message")
@@ -240,7 +245,7 @@ public class ChatController {
                 Optional<OverAllState> overAllStateOptional = aiOpsService.executeAiOpsAnalysisWithFallback(toolCallbacks);
 
                 if (overAllStateOptional.isEmpty()) {
-                    sendSseError(emitter, "多 Agent 编排未获取到有效结果");
+                    sendSseError(emitter, "Agent 编排未获取到有效结果");
                     status = "error";
                     return;
                 }
@@ -252,7 +257,7 @@ public class ChatController {
                     emitter.send(SseEmitter.event().name("message")
                             .data(SseMessage.content("\n\n" + "=".repeat(60) + "\n"), MediaType.APPLICATION_JSON));
                     emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.content("📄 **告警分析报告**\n\n"), MediaType.APPLICATION_JSON));
+                            .data(SseMessage.content("### 告警分析报告\n\n"), MediaType.APPLICATION_JSON));
                     int chunkSize = 50;
                     for (int i = 0; i < finalReportText.length(); i += chunkSize) {
                         int end = Math.min(i + chunkSize, finalReportText.length());
@@ -263,7 +268,7 @@ public class ChatController {
                             .data(SseMessage.content("\n" + "=".repeat(60) + "\n\n"), MediaType.APPLICATION_JSON));
                 } else {
                     emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.content("⚠️ 多 Agent 流程已完成，但未能生成最终报告。"), MediaType.APPLICATION_JSON));
+                            .data(SseMessage.content("Agent 流程已完成，但未生成最终报告"), MediaType.APPLICATION_JSON));
                 }
 
                 emitter.send(SseEmitter.event().name("message")
@@ -294,7 +299,7 @@ public class ChatController {
         }
         SessionInfoResponse response = new SessionInfoResponse();
         response.setSessionId(sessionId);
-        response.setMessagePairCount(session.getMessagePairCount());
+        response.setMessagePairCount(conversationMemoryService.getMessagePairCount(sessionId));
         response.setCreateTime(session.getCreateTime());
         return ResponseEntity.ok(ApiResponse.success(response));
     }
@@ -342,11 +347,9 @@ public class ChatController {
         if (!(output instanceof StreamingOutput streamingOutput)) {
             return;
         }
-        OutputType type = streamingOutput.getOutputType();
-        if (type != OutputType.AGENT_MODEL_STREAMING) {
+        if (streamingOutput.getOutputType() != OutputType.AGENT_MODEL_STREAMING) {
             return;
         }
-
         String chunk = streamingOutput.message().getText();
         if (chunk == null || chunk.isEmpty()) {
             return;
@@ -381,79 +384,25 @@ public class ChatController {
     }
 
     private SessionInfo getOrCreateSession(String sessionId) {
-        String actualSessionId = (sessionId == null || sessionId.isEmpty())
-                ? UUID.randomUUID().toString()
-                : sessionId;
-        return sessions.computeIfAbsent(actualSessionId, SessionInfo::new);
+        return sessions.computeIfAbsent(sessionId, SessionInfo::new);
+    }
+
+    private String resolveSessionId(String rawSessionId) {
+        if (rawSessionId == null || rawSessionId.isBlank()) {
+            return UUID.randomUUID().toString();
+        }
+        return rawSessionId;
     }
 
     private static class SessionInfo {
+        @Getter
         private final String sessionId;
-        private final List<Map<String, String>> messageHistory;
+        @Getter
         private final long createTime;
-        private final ReentrantLock lock;
 
         private SessionInfo(String sessionId) {
             this.sessionId = sessionId;
-            this.messageHistory = new ArrayList<>();
             this.createTime = System.currentTimeMillis();
-            this.lock = new ReentrantLock();
-        }
-
-        public long getCreateTime() {
-            return createTime;
-        }
-
-        public void addMessage(String userQuestion, String aiAnswer) {
-            lock.lock();
-            try {
-                Map<String, String> userMsg = new HashMap<>();
-                userMsg.put("role", "user");
-                userMsg.put("content", userQuestion);
-                messageHistory.add(userMsg);
-
-                Map<String, String> assistantMsg = new HashMap<>();
-                assistantMsg.put("role", "assistant");
-                assistantMsg.put("content", aiAnswer);
-                messageHistory.add(assistantMsg);
-
-                int maxMessages = MAX_WINDOW_SIZE * 2;
-                while (messageHistory.size() > maxMessages) {
-                    messageHistory.remove(0);
-                    if (!messageHistory.isEmpty()) {
-                        messageHistory.remove(0);
-                    }
-                }
-            } finally {
-                lock.unlock();
-            }
-        }
-
-        public List<Map<String, String>> getHistory() {
-            lock.lock();
-            try {
-                return new ArrayList<>(messageHistory);
-            } finally {
-                lock.unlock();
-            }
-        }
-
-        public void clearHistory() {
-            lock.lock();
-            try {
-                messageHistory.clear();
-            } finally {
-                lock.unlock();
-            }
-        }
-
-        public int getMessagePairCount() {
-            lock.lock();
-            try {
-                return messageHistory.size() / 2;
-            } finally {
-                lock.unlock();
-            }
         }
     }
 
@@ -462,11 +411,11 @@ public class ChatController {
     public static class ChatRequest {
         @com.fasterxml.jackson.annotation.JsonProperty(value = "Id")
         @com.fasterxml.jackson.annotation.JsonAlias({"id", "ID"})
-        private String Id;
+        private String id;
 
         @com.fasterxml.jackson.annotation.JsonProperty(value = "Question")
         @com.fasterxml.jackson.annotation.JsonAlias({"question", "QUESTION"})
-        private String Question;
+        private String question;
     }
 
     @Setter
@@ -474,7 +423,7 @@ public class ChatController {
     public static class ClearRequest {
         @com.fasterxml.jackson.annotation.JsonProperty(value = "Id")
         @com.fasterxml.jackson.annotation.JsonAlias({"id", "ID"})
-        private String Id;
+        private String id;
     }
 
     @Setter
@@ -558,3 +507,4 @@ public class ChatController {
         }
     }
 }
+

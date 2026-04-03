@@ -95,3 +95,22 @@ ai:
     circuit-breaker:
       failure-threshold: 2
       open-window-ms: 30000
+
+chat:
+  memory:
+    enabled: true
+    llm-enabled: false
+    llm-timeout-ms: 1200
+    recent-pairs: 6
+    compress-batch-pairs: 2
+    max-summary-chars: 1600
+
+ingest:
+  pipeline:
+    enabled: true
+    worker-threads: 2
+    queue-capacity: 200
+    task-retention-minutes: 120
+    retry:
+      max-attempts: 3
+      initial-backoff-ms: 200
