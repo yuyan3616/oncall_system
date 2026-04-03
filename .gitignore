@@ -23,6 +23,8 @@ target/
 .springBeans
 .sts4-cache
 
+/ragent
+
 ### NetBeans ###
 /nbproject/private/
 /nbbuild/
