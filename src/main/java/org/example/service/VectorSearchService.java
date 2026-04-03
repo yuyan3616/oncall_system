@@ -103,6 +103,9 @@ public class VectorSearchService {
         private String content;
         private float score;
         private String metadata;
+        private String channel;
+        private String queryUsed;
+        private Double finalScore;
 
     }
 }

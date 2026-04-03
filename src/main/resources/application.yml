@@ -49,6 +49,23 @@ document:
 rag:
   top-k: 3
   model: "qwen3-max"
+  rewrite:
+    enabled: true
+    llm-enabled: false
+    timeout-ms: 1500
+    max-sub-questions: 3
+  search:
+    channels:
+      original-enabled: true
+      rewritten-enabled: true
+      subquestion-enabled: true
+      top-k-per-channel: 5
+    postprocess:
+      dedup-enabled: true
+      rerank-enabled: true
+      vector-weight: 0.65
+      keyword-weight: 0.25
+      title-metadata-weight: 0.10
   rate-limit:
     local:
       enabled: true
