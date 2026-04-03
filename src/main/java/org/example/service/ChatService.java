@@ -9,6 +9,7 @@ import org.example.agent.tool.DateTimeTools;
 import org.example.agent.tool.InternalDocsTools;
 import org.example.agent.tool.QueryLogsTools;
 import org.example.agent.tool.QueryMetricsTools;
+import org.example.stability.model.ModelRoutingService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.ToolCallback;
@@ -44,6 +45,9 @@ public class ChatService {
     @Autowired
     private ToolCallbackProvider tools;
 
+    @Autowired
+    private ModelRoutingService modelRoutingService;
+
     @Value("${spring.ai.dashscope.api-key}")
     private String dashScopeApiKey;
 
@@ -62,11 +66,15 @@ public class ChatService {
      * @param maxToken 最大输出长度
      * @param topP 核采样参数
      */
-    public DashScopeChatModel createChatModel(DashScopeApi dashScopeApi, double temperature, int maxToken, double topP) {
+    public DashScopeChatModel createChatModel(DashScopeApi dashScopeApi,
+                                              String model,
+                                              double temperature,
+                                              int maxToken,
+                                              double topP) {
         return DashScopeChatModel.builder()
                 .dashScopeApi(dashScopeApi)
                 .defaultOptions(DashScopeChatOptions.builder()
-                        .withModel(DashScopeChatModel.DEFAULT_MODEL_NAME)
+                        .withModel(model)
                         .withTemperature(temperature)
                         .withMaxToken(maxToken)
                         .withTopP(topP)
@@ -78,7 +86,11 @@ public class ChatService {
      * 创建标准对话 ChatModel（默认参数）
      */
     public DashScopeChatModel createStandardChatModel(DashScopeApi dashScopeApi) {
-        return createChatModel(dashScopeApi, 0.7, 2000, 0.9);
+        return createStandardChatModel(dashScopeApi, DashScopeChatModel.DEFAULT_MODEL_NAME);
+    }
+
+    public DashScopeChatModel createStandardChatModel(DashScopeApi dashScopeApi, String model) {
+        return createChatModel(dashScopeApi, model, 0.7, 2000, 0.9);
     }
 
     /**
@@ -176,5 +188,17 @@ public class ChatService {
         String answer = response.getText();
         logger.info("ReactAgent 对话完成，答案长度: {}", answer.length());
         return answer;
+    }
+    public String executeChatWithFallback(String endpoint, String systemPrompt, String question) {
+        DashScopeApi dashScopeApi = createDashScopeApi();
+        return modelRoutingService.executeWithFallback(
+                ModelRoutingService.RouteGroup.CHAT,
+                endpoint,
+                model -> {
+                    DashScopeChatModel chatModel = createStandardChatModel(dashScopeApi, model);
+                    ReactAgent agent = createReactAgent(chatModel, systemPrompt);
+                    return executeChat(agent, question);
+                }
+        );
     }
 }

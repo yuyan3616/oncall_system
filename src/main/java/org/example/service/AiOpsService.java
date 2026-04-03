@@ -1,5 +1,6 @@
 package org.example.service;
 
+import com.alibaba.cloud.ai.dashscope.api.DashScopeApi;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
@@ -9,6 +10,7 @@ import org.example.agent.tool.DateTimeTools;
 import org.example.agent.tool.InternalDocsTools;
 import org.example.agent.tool.QueryLogsTools;
 import org.example.agent.tool.QueryMetricsTools;
+import org.example.stability.model.ModelRoutingService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -39,6 +41,12 @@ public class AiOpsService {
 
     @Autowired(required = false)  // Mock 模式下才注册
     private QueryLogsTools queryLogsTools;
+
+    @Autowired
+    private ChatService chatService;
+
+    @Autowired
+    private ModelRoutingService modelRoutingService;
 
     /**
      * 执行 AI Ops 告警分析流程
@@ -274,5 +282,16 @@ public class AiOpsService {
                 只允许在 planner_agent、executor_agent 与 FINISH 之间做出选择。
 
                 """;
+    }
+    public Optional<OverAllState> executeAiOpsAnalysisWithFallback(ToolCallback[] toolCallbacks) {
+        DashScopeApi dashScopeApi = chatService.createDashScopeApi();
+        return modelRoutingService.executeWithFallback(
+                ModelRoutingService.RouteGroup.AIOPS,
+                "/api/ai_ops",
+                model -> {
+                    DashScopeChatModel chatModel = chatService.createChatModel(dashScopeApi, model, 0.3, 8000, 0.9);
+                    return executeAiOpsAnalysis(chatModel, toolCallbacks);
+                }
+        );
     }
 }
