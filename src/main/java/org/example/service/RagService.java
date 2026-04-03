@@ -36,7 +36,7 @@ public class RagService {
     @Value("${rag.top-k:3}")
     private int topK;
 
-    @Value("${rag.model:qwen3-30b-a3b-thinking-2507}")
+    @Value("${rag.model:qwen-plus}")
     private String model;
 
     private Generation generation;

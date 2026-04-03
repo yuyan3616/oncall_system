@@ -82,16 +82,16 @@ prometheus:
   mock-enabled: true
 
 cls:
-  mock-enabled: false
+  mock-enabled: true # 开启mock
 
 ai:
   routing:
     chat:
       models:
-        - qwen3-max
+        - qwen-plus
     aiops:
       models:
-        - qwen3-max
+        - qwen-plus
     circuit-breaker:
       failure-threshold: 2
       open-window-ms: 30000

@@ -47,18 +47,10 @@ public class VectorEmbeddingService {
         String maskedKey = apiKey.length() > 8 ? 
             apiKey.substring(0, 8) + "..." + apiKey.substring(apiKey.length() - 4) : 
             "***";
-        logger.info("API Key 已加载: {}", maskedKey);
+        logger.info("API Key 已加载");
         
         // 设置全局 API Key（确保设置成功）
         Constants.apiKey = apiKey;
-        
-        // 验证 API Key 是否设置成功
-        if (Constants.apiKey == null || Constants.apiKey.isEmpty()) {
-            logger.error("Constants.apiKey 设置失败！");
-            throw new IllegalStateException("API Key 设置到 Constants 失败");
-        }
-        
-        logger.info("Constants.apiKey 已设置: {}", Constants.apiKey.substring(0, Math.min(8, Constants.apiKey.length())) + "...");
         
         // 创建 TextEmbedding 实例
         textEmbedding = new TextEmbedding();
